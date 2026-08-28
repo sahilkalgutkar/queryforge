@@ -843,6 +843,16 @@ pub fn bind(query: &Query, catalog: &Catalog) -> Result<LogicalPlan> {
     Binder::new(catalog).bind_query(query)
 }
 
+/// Binds a row of constant expressions — the values of an `INSERT`.
+///
+/// The scope is empty, so a column reference in a `VALUES` row is reported as
+/// an unknown column rather than silently resolving against some table.
+pub fn bind_constant_row(exprs: &[Expr], catalog: &Catalog) -> Result<Vec<BoundExpr>> {
+    let binder = Binder::new(catalog);
+    let scope = Scope::default();
+    exprs.iter().map(|e| binder.bind_expr(e, &scope)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
