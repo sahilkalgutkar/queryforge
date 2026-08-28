@@ -56,7 +56,9 @@ impl fmt::Display for DataType {
             DataType::Float64 => "FLOAT64",
             DataType::Utf8 => "UTF8",
         };
-        f.write_str(s)
+        // `pad` rather than `write_str`, so `{:<10}` actually aligns the type
+        // column in `\d`. `write_str` silently ignores the width.
+        f.pad(s)
     }
 }
 
@@ -249,6 +251,12 @@ mod tests {
         assert!(Schema::empty().is_empty());
         assert!(schema().contains("ID"));
         assert!(!schema().contains("missing"));
+    }
+
+    #[test]
+    fn type_names_honour_a_format_width_so_columns_line_up() {
+        assert_eq!(format!("{:<10}|", DataType::Int64), "INT64     |");
+        assert_eq!(format!("{:<10}|", DataType::Float64), "FLOAT64   |");
     }
 
     #[test]

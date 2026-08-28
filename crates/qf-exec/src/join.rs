@@ -151,78 +151,85 @@ impl HashJoinExec {
     }
 
     fn probe(&mut self, probe_batch: &RecordBatch) -> Result<RecordBatch> {
-        let built = self.built.as_ref().expect("built before probing");
-        let mut build_rows: Vec<Option<usize>> = Vec::new();
-        let mut probe_rows: Vec<Option<usize>> = Vec::new();
+        // Candidate pairs first, with no padding. The ON clause decides what
+        // counts as a match, and its non-equality part is as much a part of
+        // that decision as the keys are — so it has to be applied *before*
+        // asking whether a probe row matched anything.
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        {
+            let built = self.built.as_ref().expect("built before probing");
+            if self.on.is_empty() {
+                for p in 0..probe_batch.num_rows() {
+                    for b in 0..built.batch.num_rows() {
+                        candidates.push((b, p));
+                    }
+                }
+            } else {
+                let probe_keys: Vec<&BoundExpr> = self
+                    .on
+                    .iter()
+                    .map(|(l, r)| match self.build_side {
+                        BuildSide::Left => r,
+                        BuildSide::Right => l,
+                    })
+                    .collect();
+                let columns = probe_keys
+                    .iter()
+                    .map(|e| evaluate(e, probe_batch))
+                    .collect::<Result<Vec<_>>>()?;
+                for p in 0..probe_batch.num_rows() {
+                    let key: Vec<Value> = columns.iter().map(|c| c.value(p)).collect();
+                    // A NULL key never joins: `NULL = NULL` is unknown.
+                    if key.iter().any(Value::is_null) {
+                        continue;
+                    }
+                    if let Some(rows) = built.index.get(&key) {
+                        for b in rows {
+                            candidates.push((*b, p));
+                        }
+                    }
+                }
+            }
+        }
 
-        if self.on.is_empty() {
-            // A cross join: every build row against every probe row.
-            for p in 0..probe_batch.num_rows() {
-                for b in 0..built.batch.num_rows() {
-                    build_rows.push(Some(b));
+        // Apply the ON clause's non-equality part to the candidates.
+        if let Some(filter) = self.filter.clone().filter(|_| !candidates.is_empty()) {
+            let build_rows: Vec<Option<usize>> = candidates.iter().map(|(b, _)| Some(*b)).collect();
+            let probe_rows: Vec<Option<usize>> = candidates.iter().map(|(_, p)| Some(*p)).collect();
+            let assembled = self.assemble(&build_rows, &probe_rows, probe_batch)?;
+            let mask = crate::eval::evaluate_predicate(&filter, &assembled)?;
+            candidates = candidates
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| mask.get(*i))
+                .map(|(_, c)| c)
+                .collect();
+        }
+
+        // Only now is it settled which probe rows matched, so a preserved
+        // probe row that had candidates but lost them all still comes back
+        // padded rather than disappearing.
+        let mut build_rows: Vec<Option<usize>> = Vec::with_capacity(candidates.len());
+        let mut probe_rows: Vec<Option<usize>> = Vec::with_capacity(candidates.len());
+        let mut probe_matched = vec![false; probe_batch.num_rows()];
+        for (b, p) in &candidates {
+            build_rows.push(Some(*b));
+            probe_rows.push(Some(*p));
+            probe_matched[*p] = true;
+            if self.build_is_preserved() {
+                self.matched[*b] = true;
+            }
+        }
+        if self.probe_is_preserved() {
+            for (p, matched) in probe_matched.iter().enumerate() {
+                if !matched {
+                    build_rows.push(None);
                     probe_rows.push(Some(p));
                 }
             }
-        } else {
-            let probe_keys: Vec<&BoundExpr> = self
-                .on
-                .iter()
-                .map(|(l, r)| match self.build_side {
-                    BuildSide::Left => r,
-                    BuildSide::Right => l,
-                })
-                .collect();
-            let columns = probe_keys
-                .iter()
-                .map(|e| evaluate(e, probe_batch))
-                .collect::<Result<Vec<_>>>()?;
-
-            for p in 0..probe_batch.num_rows() {
-                let key: Vec<Value> = columns.iter().map(|c| c.value(p)).collect();
-                let hits = if key.iter().any(Value::is_null) {
-                    None
-                } else {
-                    built.index.get(&key)
-                };
-                match hits {
-                    Some(rows) if !rows.is_empty() => {
-                        for b in rows {
-                            build_rows.push(Some(*b));
-                            probe_rows.push(Some(p));
-                        }
-                    }
-                    _ => {
-                        if self.probe_is_preserved() {
-                            build_rows.push(None);
-                            probe_rows.push(Some(p));
-                        }
-                    }
-                }
-            }
         }
 
-        let out = self.assemble(&build_rows, &probe_rows, probe_batch)?;
-
-        // Apply the ON clause's non-equality part after matching. It can only
-        // remove rows, so a probe row that survives matching but fails the
-        // filter must come back NULL-padded on a preserved side.
-        let out = match &self.filter {
-            None => out,
-            Some(f) => {
-                let mask = crate::eval::evaluate_predicate(f, &out)?;
-                out.filter(&mask)?
-            }
-        };
-
-        // Record which build rows matched, for the outer-join tail.
-        if self.build_is_preserved() {
-            for (b, p) in build_rows.iter().zip(probe_rows.iter()) {
-                if let (Some(b), Some(_)) = (b, p) {
-                    self.matched[*b] = true;
-                }
-            }
-        }
-        Ok(out)
+        self.assemble(&build_rows, &probe_rows, probe_batch)
     }
 
     /// Gathers the chosen rows from both sides into one batch, always with the
@@ -514,6 +521,52 @@ mod tests {
         let out = collect_one(&mut op).unwrap();
         assert_eq!(out.num_rows(), 1);
         assert_eq!(out.row(0)[1], Value::Utf8("l1".into()));
+    }
+
+    #[test]
+    fn a_left_join_whose_on_clause_rejects_a_match_pads_rather_than_drops() {
+        // The bug this was written for: the ON clause's non-equality part was
+        // applied *after* deciding what matched, so a preserved row whose only
+        // candidate failed the condition vanished instead of coming back
+        // NULL-padded — and so did rows that never had a candidate at all.
+        let (ls, lb) = table("l", &[Some(1), Some(2)]);
+        let (rs, rb) = table("r", &[Some(1)]);
+        let never_true = BoundExpr::binary(
+            BoundExpr::column(2, "r_id", DataType::Int64),
+            qf_sql::ast::BinaryOp::Gt,
+            BoundExpr::Literal(Value::Int64(1000)),
+        )
+        .unwrap();
+        let mut op = HashJoinExec::new(
+            operator(ls, lb),
+            operator(rs, rb),
+            JoinType::Left,
+            vec![(key(0), key(0))],
+            Some(never_true),
+            BuildSide::Right,
+        );
+        let out = collect_one(&mut op).unwrap();
+        assert_eq!(out.num_rows(), 2, "both left rows must survive");
+        assert!(out.rows().all(|r| r[2].is_null()), "both must be padded");
+    }
+
+    #[test]
+    fn a_full_join_with_a_rejecting_on_clause_preserves_both_sides() {
+        let (ls, lb) = table("l", &[Some(1)]);
+        let (rs, rb) = table("r", &[Some(1)]);
+        let never_true = BoundExpr::Literal(Value::Boolean(false));
+        let mut op = HashJoinExec::new(
+            operator(ls, lb),
+            operator(rs, rb),
+            JoinType::Full,
+            vec![(key(0), key(0))],
+            Some(never_true),
+            BuildSide::Right,
+        );
+        let out = collect_one(&mut op).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert!(out.rows().any(|r| r[0].is_null()));
+        assert!(out.rows().any(|r| r[2].is_null()));
     }
 
     #[test]

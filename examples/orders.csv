@@ -1,0 +1,11 @@
+id,customer_id,region,status,amount
+1,10,eu,shipped,120.50
+2,10,eu,delivered,89.00
+3,20,us,pending,240.75
+4,20,us,cancelled,
+5,30,apac,shipped,510.00
+6,30,apac,delivered,45.25
+7,40,eu,pending,199.99
+8,10,eu,shipped,75.00
+9,50,us,delivered,310.10
+10,20,us,shipped,64.40

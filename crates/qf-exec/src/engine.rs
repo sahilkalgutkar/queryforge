@@ -283,9 +283,19 @@ impl Session {
     /// Builds the operator tree for a query without draining it. Lets a caller
     /// inspect per-operator counters after running it themselves.
     pub fn operators(&mut self, sql: &str) -> Result<Box<dyn Operator>> {
+        self.operators_with(sql, true)
+    }
+
+    /// The same, with the optimiser optionally skipped.
+    ///
+    /// Running a query both ways is the only honest way to say what the
+    /// optimiser is worth: the benchmark measures the difference rather than
+    /// asserting it.
+    pub fn operators_with(&mut self, sql: &str, optimized: bool) -> Result<Box<dyn Operator>> {
         match Parser::parse_one(sql)? {
             Statement::Query(q) => {
-                let plan = self.plan_query(&q)?;
+                let plan = bind(&q, &self.catalog)?;
+                let plan = if optimized { optimize(plan)? } else { plan };
                 build(&plan, &self.catalog)
             }
             other => Err(Error::plan(format!("cannot run {other:?}"))),

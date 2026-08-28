@@ -1750,6 +1750,268 @@ mod tests {
         best.1
     }
 
+    // ---- the rewriting machinery, exercised directly ----
+
+    fn c(i: usize) -> BoundExpr {
+        BoundExpr::column(i, format!("c{i}"), DataType::Int64)
+    }
+
+    fn text(i: usize) -> BoundExpr {
+        BoundExpr::column(i, format!("s{i}"), DataType::Utf8)
+    }
+
+    /// A projection mapping output position i to input position 10 + i.
+    fn shift_by_ten() -> Vec<(BoundExpr, String)> {
+        (0..4).map(|i| (c(10 + i), format!("out{i}"))).collect()
+    }
+
+    #[test]
+    fn substitution_reaches_inside_every_expression_shape() {
+        let projection = shift_by_ten();
+        let shapes: Vec<BoundExpr> = vec![
+            BoundExpr::binary(c(0), BinaryOp::Plus, c(1)).unwrap(),
+            BoundExpr::unary(UnaryOp::Neg, c(0)).unwrap(),
+            BoundExpr::Cast {
+                expr: Box::new(c(0)),
+                data_type: DataType::Float64,
+            },
+            BoundExpr::IsNull {
+                expr: Box::new(c(0)),
+                negated: true,
+            },
+            BoundExpr::InList {
+                expr: Box::new(c(0)),
+                list: vec![c(1), BoundExpr::Literal(Value::Int64(3))],
+                negated: false,
+            },
+            BoundExpr::case(
+                vec![(BoundExpr::binary(c(0), BinaryOp::Gt, c(1)).unwrap(), c(2))],
+                Some(c(3)),
+            )
+            .unwrap(),
+        ];
+        for shape in shapes {
+            let rewritten = substitute(&shape, &projection).expect("should substitute");
+            let expected: Vec<usize> = shape.column_indices().iter().map(|i| i + 10).collect();
+            assert_eq!(rewritten.column_indices(), expected, "{shape}");
+        }
+    }
+
+    #[test]
+    fn substitution_reaches_inside_a_like_expression() {
+        let projection = vec![(text(10), "a".to_string()), (text(11), "b".to_string())];
+        let like = BoundExpr::Like {
+            expr: Box::new(text(0)),
+            pattern: Box::new(text(1)),
+            negated: true,
+        };
+        let rewritten = substitute(&like, &projection).unwrap();
+        assert_eq!(rewritten.column_indices(), vec![10, 11]);
+    }
+
+    #[test]
+    fn substitution_refuses_a_projection_that_computes_rather_than_renames() {
+        // Pushing a predicate through `SELECT a + b AS x` would duplicate the
+        // addition rather than save work, so the rule declines.
+        let computed = vec![(
+            BoundExpr::binary(c(0), BinaryOp::Plus, c(1)).unwrap(),
+            "x".to_string(),
+        )];
+        let predicate =
+            BoundExpr::binary(c(0), BinaryOp::Gt, BoundExpr::Literal(Value::Int64(1))).unwrap();
+        assert!(substitute(&predicate, &computed).is_none());
+    }
+
+    #[test]
+    fn substitution_refuses_a_column_the_projection_does_not_produce() {
+        let projection = vec![(c(10), "a".to_string())];
+        assert!(substitute(&c(5), &projection).is_none());
+    }
+
+    #[test]
+    fn a_literal_only_expression_substitutes_to_itself() {
+        let projection = shift_by_ten();
+        let lit = BoundExpr::Literal(Value::Int64(7));
+        assert_eq!(substitute(&lit, &projection).unwrap(), lit);
+    }
+
+    #[test]
+    fn rewriting_a_column_with_no_replacement_is_an_error() {
+        assert!(rewrite_columns(&c(0), &|_| None).is_err());
+    }
+
+    #[test]
+    fn folding_covers_every_comparison_operator() {
+        let cases = [
+            (BinaryOp::Eq, 1, 1, true),
+            (BinaryOp::NotEq, 1, 2, true),
+            (BinaryOp::Lt, 1, 2, true),
+            (BinaryOp::LtEq, 2, 2, true),
+            (BinaryOp::Gt, 3, 2, true),
+            (BinaryOp::GtEq, 2, 2, true),
+            (BinaryOp::Lt, 3, 2, false),
+        ];
+        for (op, a, b, want) in cases {
+            let e = BoundExpr::binary(
+                BoundExpr::Literal(Value::Int64(a)),
+                op,
+                BoundExpr::Literal(Value::Int64(b)),
+            )
+            .unwrap();
+            assert_eq!(
+                fold_expr(&e).unwrap().as_literal(),
+                Some(&Value::Boolean(want)),
+                "{a} {op} {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_covers_every_arithmetic_operator_in_both_int_and_float_form() {
+        let cases: [(BinaryOp, i64, i64, Value); 4] = [
+            (BinaryOp::Plus, 2, 3, Value::Int64(5)),
+            (BinaryOp::Minus, 5, 3, Value::Int64(2)),
+            (BinaryOp::Multiply, 4, 3, Value::Int64(12)),
+            (BinaryOp::Modulo, 7, 4, Value::Int64(3)),
+        ];
+        for (op, a, b, want) in cases {
+            let e = BoundExpr::binary(
+                BoundExpr::Literal(Value::Int64(a)),
+                op,
+                BoundExpr::Literal(Value::Int64(b)),
+            )
+            .unwrap();
+            assert_eq!(fold_expr(&e).unwrap().as_literal(), Some(&want), "{op}");
+        }
+        let float = BoundExpr::binary(
+            BoundExpr::Literal(Value::Float64(1.5)),
+            BinaryOp::Plus,
+            BoundExpr::Literal(Value::Int64(1)),
+        )
+        .unwrap();
+        assert_eq!(
+            fold_expr(&float).unwrap().as_literal(),
+            Some(&Value::Float64(2.5))
+        );
+    }
+
+    #[test]
+    fn comparing_a_literal_with_null_folds_to_null_not_to_false() {
+        let e = BoundExpr::binary(
+            BoundExpr::Literal(Value::Int64(1)),
+            BinaryOp::Eq,
+            BoundExpr::Literal(Value::Null),
+        )
+        .unwrap();
+        assert_eq!(fold_expr(&e).unwrap().as_literal(), Some(&Value::Null));
+    }
+
+    #[test]
+    fn folding_reaches_inside_in_lists_and_like_patterns() {
+        let in_list = BoundExpr::InList {
+            expr: Box::new(c(0)),
+            list: vec![BoundExpr::binary(
+                BoundExpr::Literal(Value::Int64(1)),
+                BinaryOp::Plus,
+                BoundExpr::Literal(Value::Int64(1)),
+            )
+            .unwrap()],
+            negated: false,
+        };
+        assert_eq!(fold_expr(&in_list).unwrap().to_string(), "c0#0 IN (2)");
+
+        let like = BoundExpr::Like {
+            expr: Box::new(text(0)),
+            pattern: Box::new(BoundExpr::Cast {
+                expr: Box::new(BoundExpr::Literal(Value::Int64(5))),
+                data_type: DataType::Utf8,
+            }),
+            negated: false,
+        };
+        assert_eq!(fold_expr(&like).unwrap().to_string(), "s0#0 LIKE '5'");
+    }
+
+    #[test]
+    fn a_case_whose_first_branch_is_unknown_drops_that_branch() {
+        let e = BoundExpr::Case {
+            branches: vec![
+                (BoundExpr::Literal(Value::Null), c(0)),
+                (BoundExpr::Literal(Value::Boolean(true)), c(1)),
+            ],
+            else_result: None,
+            data_type: DataType::Int64,
+        };
+        assert_eq!(fold_expr(&e).unwrap(), c(1));
+    }
+
+    #[test]
+    fn a_case_with_a_live_branch_before_a_constant_one_keeps_both() {
+        let live =
+            BoundExpr::binary(c(0), BinaryOp::Gt, BoundExpr::Literal(Value::Int64(1))).unwrap();
+        let e = BoundExpr::Case {
+            branches: vec![
+                (live, c(1)),
+                (BoundExpr::Literal(Value::Boolean(true)), c(2)),
+                // Unreachable: the branch above always fires.
+                (BoundExpr::Literal(Value::Boolean(true)), c(3)),
+            ],
+            else_result: None,
+            data_type: DataType::Int64,
+        };
+        let folded = fold_expr(&e).unwrap();
+        match folded {
+            BoundExpr::Case { branches, .. } => assert_eq!(branches.len(), 2),
+            other => panic!("unexpected {other}"),
+        }
+    }
+
+    #[test]
+    fn a_scan_of_a_table_with_no_useful_columns_still_reads_one() {
+        // `SELECT count(*)` needs rows, not columns.
+        let plan = opt("SELECT count(*) FROM orders");
+        match scans(&plan)[0] {
+            LogicalPlan::Scan {
+                projection: Some(p),
+                ..
+            } => assert_eq!(p.len(), 1),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn projection_pushdown_restores_the_output_order_when_pruning_reorders_it() {
+        // Selecting the columns backwards means the pruned scan produces them
+        // in source order and something has to put them back.
+        let sql = "SELECT amount, id FROM orders";
+        let before = raw(sql).schema().unwrap();
+        let after = push_down_projections(raw(sql)).unwrap().schema().unwrap();
+        assert_eq!(before, after);
+        assert_eq!(after.field(0).unwrap().name, "amount");
+    }
+
+    #[test]
+    fn folding_a_scan_drops_a_pushed_filter_that_became_true() {
+        let scan = LogicalPlan::Scan {
+            table: "orders".into(),
+            source_schema: raw("SELECT * FROM orders").schema().unwrap(),
+            projection: None,
+            pushed_filters: vec![
+                BoundExpr::binary(
+                    BoundExpr::Literal(Value::Int64(1)),
+                    BinaryOp::Eq,
+                    BoundExpr::Literal(Value::Int64(1)),
+                )
+                .unwrap(),
+                BoundExpr::binary(c(0), BinaryOp::Gt, BoundExpr::Literal(Value::Int64(5))).unwrap(),
+            ],
+            stats: TableStats::default(),
+        };
+        match fold_constants(scan).unwrap() {
+            LogicalPlan::Scan { pushed_filters, .. } => assert_eq!(pushed_filters.len(), 1),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     #[test]
     fn the_rule_list_is_reported_for_explain() {
         assert_eq!(RULES.len(), 4);
