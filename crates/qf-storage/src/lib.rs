@@ -1,1 +1,9 @@
-// placeholder
+pub mod array;
+pub mod batch;
+pub mod bitmap;
+pub mod bytes;
+pub mod catalog;
+pub mod csv;
+pub mod encoding;
+pub mod format;
+pub mod stats;
