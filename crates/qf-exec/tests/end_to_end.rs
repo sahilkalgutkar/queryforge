@@ -381,6 +381,24 @@ fn a_full_join_preserves_both_sides() {
 }
 
 #[test]
+fn a_left_join_with_a_condition_in_its_on_clause_still_returns_every_left_row() {
+    // The condition belongs to the match, not to the result: customers whose
+    // orders do not satisfy it — and customers with no orders at all — must
+    // still come back, padded.
+    let mut s = session();
+    let r = rows(
+        &mut s,
+        "SELECT c.name, o.id FROM customers c \
+         LEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 200 \
+         ORDER BY c.name, o.id",
+    );
+    assert_eq!(r.len(), 3, "one row per customer: {r:?}");
+    assert_eq!(r[0], vec!["ada", "2"]);
+    assert_eq!(r[1], vec!["brendan", "NULL"], "no order over 200");
+    assert_eq!(r[2], vec!["grace", "NULL"], "no orders at all");
+}
+
+#[test]
 fn a_cross_join_produces_the_product() {
     let mut s = session();
     assert_eq!(
