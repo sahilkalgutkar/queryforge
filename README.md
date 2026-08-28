@@ -185,8 +185,13 @@ join                         4999       1.22ms    123.6x   151.20ms      2 read 
 
 The three-figure numbers are zone-map pruning: reading 3 row groups instead of
 62. The 4.5x on a full aggregate is projection pushdown on its own — one column
-chunk per row group instead of four. Reproduce with `cargo run --release --
-bench`.
+chunk per row group instead of four.
+
+That table is one recorded run, not a fixed result: `cargo run --release --
+bench` regenerates it, and the ratios move by tens of percent between runs and
+between machines. The row-group counts do not, which is why they are the number
+worth reading — they are a property of the data and the predicate rather than of
+the hardware.
 
 `EXPLAIN ANALYZE` reports the same counters per operator:
 
