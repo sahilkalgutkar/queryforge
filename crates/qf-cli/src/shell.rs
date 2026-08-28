@@ -165,7 +165,7 @@ impl Shell {
                 _ => String::new(),
             };
             out.push_str(&format!(
-                "  {:<20} {:<10} {null}{stats}\n",
+                "  {:<20} {:<10} {null:<9}{stats}\n",
                 f.name, f.data_type
             ));
         }
