@@ -193,12 +193,11 @@ impl HashJoinExec {
         }
 
         // Apply the ON clause's non-equality part to the candidates.
-        if self.filter.is_some() && !candidates.is_empty() {
+        if let Some(filter) = self.filter.clone().filter(|_| !candidates.is_empty()) {
             let build_rows: Vec<Option<usize>> = candidates.iter().map(|(b, _)| Some(*b)).collect();
             let probe_rows: Vec<Option<usize>> = candidates.iter().map(|(_, p)| Some(*p)).collect();
             let assembled = self.assemble(&build_rows, &probe_rows, probe_batch)?;
-            let filter = self.filter.as_ref().expect("a filter");
-            let mask = crate::eval::evaluate_predicate(filter, &assembled)?;
+            let mask = crate::eval::evaluate_predicate(&filter, &assembled)?;
             candidates = candidates
                 .into_iter()
                 .enumerate()
