@@ -1,0 +1,20 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+
+ignore:
+  # The REPL's terminal loop is stdin plumbing: read a line, hand it to the
+  # engine, print what comes back. Every part of it worth testing lives in
+  # `session.rs`, which the tests drive directly.
+  - "crates/qf-cli/src/repl.rs"

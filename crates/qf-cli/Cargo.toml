@@ -1,0 +1,19 @@
+[package]
+name = "qf-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "queryforge"
+path = "src/main.rs"
+
+[dependencies]
+qf-common.workspace = true
+qf-storage.workspace = true
+qf-sql.workspace = true
+qf-plan.workspace = true
+qf-exec.workspace = true

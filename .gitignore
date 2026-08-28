@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.qfc
+!data/*.qfc
+lcov.info
+.DS_Store

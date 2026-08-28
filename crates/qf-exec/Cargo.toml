@@ -1,0 +1,14 @@
+[package]
+name = "qf-exec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+qf-common.workspace = true
+qf-plan.workspace = true
+qf-sql.workspace = true
+qf-storage.workspace = true
