@@ -1,0 +1,9 @@
+# One canonical identity for every commit in this repo.
+#
+# The history carries three author strings, all mine:
+#   - an older display name of "Sahil Kalgutkar" on the same address
+#   - the GitHub noreply address, which GitHub stamps on the merge commits it
+#     creates when a pull request is merged from the web
+# git shortlog, git log and git blame read this file and collapse them.
+sahilkalgutkar <kalgutkarsahil98@gmail.com> <87792369+sahilkalgutkar@users.noreply.github.com>
+sahilkalgutkar <kalgutkarsahil98@gmail.com> Sahil Kalgutkar <kalgutkarsahil98@gmail.com>
